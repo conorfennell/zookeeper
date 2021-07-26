@@ -2,11 +2,18 @@ package com.idiomcentric
 
 import com.fasterxml.jackson.annotation.JsonSetter
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
+import com.google.common.io.BaseEncoding
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.future.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.slf4j.MDCContext
+import kotlinx.coroutines.withContext
+import mu.KotlinLogging
+import mu.withLoggingContext
 import org.apache.curator.RetryPolicy
 import org.apache.curator.framework.CuratorFramework
 import org.apache.curator.framework.CuratorFrameworkFactory.newClient
@@ -20,15 +27,28 @@ import org.apache.curator.x.async.modeled.ZPath
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.TimeUnit
+private val log = KotlinLogging.logger { }
 
 fun main() {
     runBlocking(Dispatchers.IO) {
-        for (version in 1..50) {
+        for (version in 30.downTo(1)) {
             launch {
-                checkAndUpdate(version, Square(1, version))
+                withLoggingContext(mapOf("VERSION" to version.toString())) {
+                    withContext(MDCContext()) {
+                        log.info { "GOOOOOOOO" }
+                        checkAndUpdate(version, Square(1, version))
+                    }
+                }
             }
         }
     }
+    log.info("ALL finished")
+}
+
+suspend fun hello(time: Long) {
+    log.info("Started: $time")
+    delay(time)
+    log.info("Finished: $time")
 }
 
 suspend fun checkAndUpdate(version: Int, config: Square) {
@@ -38,7 +58,7 @@ suspend fun checkAndUpdate(version: Int, config: Square) {
         3,
         "127.0.0.1:2181",
         "/mutex/service/important",
-        "/root/modeled",
+        "/data/shared",
         30,
     )
     val retryPolicy: RetryPolicy = RetryNTimes(zookeeperConfig.maxRetries, zookeeperConfig.sleepMsBetweenRetries)
@@ -47,29 +67,33 @@ suspend fun checkAndUpdate(version: Int, config: Square) {
     client.start()
 
     val mapper = ObjectMapper()
-    mapper.registerModule(JavaTimeModule())
+        .registerModule(JavaTimeModule())
+        .configure(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS, false)
 
-    val configSpec: ModelSpec<MetaConfig> = ModelSpec.builder(
+    val configSpec: ModelSpec<LastApplied> = ModelSpec.builder(
         ZPath.parseWithIds(zookeeperConfig.dataPath),
-        JacksonModelSerializer<MetaConfig>(mapper, mapper.typeFactory.constructType(MetaConfig::class.java))
+        JacksonModelSerializer<LastApplied>(mapper, mapper.typeFactory.constructType(LastApplied::class.java))
     ).build()
     val async = AsyncCuratorFramework.wrap(client)
-    val modeledClient: ModeledFramework<MetaConfig> = ModeledFramework.wrap(async, configSpec)
+    val lastAppliedClient: ModeledFramework<LastApplied> = ModeledFramework.wrap(async, configSpec)
 
     when (client.checkExists().forPath(zookeeperConfig.dataPath)) {
-        null -> client.createContainers(zookeeperConfig.dataPath)
+        null -> {
+            client.createContainers(zookeeperConfig.dataPath)
+            lastAppliedClient.set(LastApplied("FIRST_TIME_HASH", Instant.now())).await()
+        }
     }
 
-    val metaConfig = modeledClient.read().await()
+    val lastApplied = lastAppliedClient.read().await()
 
-    if (metaConfig.hash != configHash) {
+    if (lastApplied.hash != configHash) {
         lockRelease(zookeeperConfig, version, client) {
-            val metaConfig = modeledClient.read().await()
-            println("Retrieved: $metaConfig")
-            if (metaConfig.hash != configHash) {
-                modeledClient.set(MetaConfig(configHash, Instant.now())).await()
+            val latestLastApplied = lastAppliedClient.read().await()
+            log.info("Retrieved: $latestLastApplied")
+            if (latestLastApplied.hash != configHash) {
+                lastAppliedClient.set(LastApplied(configHash, Instant.now())).await()
             }
-            println("Processed $version")
+            log.info("Processed $version")
         }
     }
     client.close()
@@ -80,14 +104,15 @@ suspend fun lockRelease(config: ZookeeperConfig, version: Int, client: CuratorFr
 
     sharedLock.acquire(config.lockTimeout, TimeUnit.SECONDS)
 
-    println("Acquired lock $version")
+    log.info("Acquired lock $version")
     try {
         block()
-    } catch (ex: Exception) {
-        println(ex)
+    } catch (exception: Exception) {
+        log.error(exception) { "Error doing work" }
+        throw exception
     } finally {
         sharedLock.release()
-        println("Released lock $version")
+        log.info("Released lock $version")
     }
 }
 
@@ -104,26 +129,14 @@ fun String.sha256(): String {
     return hashString("SHA-256", this)
 }
 
-const val HEX_CHARS = "0123456789ABCDEF"
-
 private fun hashString(type: String, input: String): String {
     val bytes = MessageDigest
         .getInstance(type)
         .digest(input.toByteArray())
-    val result = StringBuilder(bytes.size * 2)
 
-    StringBuilder(bytes.size * 2).let { }
-
-    bytes.forEach {
-        val i = it.toInt()
-        result.append(HEX_CHARS[i shr 4 and 0x0f])
-        result.append(HEX_CHARS[i and 0x0f])
-    }
-    return result.toString()
+    return BaseEncoding.base16().encode(bytes)
 }
-
 
 data class Square(@JsonSetter("x") val x: Int, @JsonSetter("y") val y: Int)
 
-data class MetaConfig(@JsonSetter("hash") val hash: String, @JsonSetter("updatedAt") val updatedAt: Instant)
-
+data class LastApplied(@JsonSetter("hash") val hash: String, @JsonSetter("updatedAt") val updatedAt: Instant)
