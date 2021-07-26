@@ -29,14 +29,14 @@ import java.time.Instant
 import java.util.concurrent.TimeUnit
 private val log = KotlinLogging.logger { }
 
-fun main() {
+fun main(connectString: String) {
     runBlocking(Dispatchers.IO) {
         for (version in 30.downTo(1)) {
             launch {
                 withLoggingContext(mapOf("VERSION" to version.toString())) {
                     withContext(MDCContext()) {
                         log.info { "GOOOOOOOO" }
-                        checkAndUpdate(version, Square(1, version))
+                        checkAndUpdate(connectString, version, Square(1, version))
                     }
                 }
             }
@@ -45,18 +45,13 @@ fun main() {
     log.info("ALL finished")
 }
 
-suspend fun hello(time: Long) {
-    log.info("Started: $time")
-    delay(time)
-    log.info("Finished: $time")
-}
 
-suspend fun checkAndUpdate(version: Int, config: Square) {
+suspend fun checkAndUpdate(connectString: String = "127.0.0.1:2181", version: Int, config: Square) {
     val configHash = config.toString().sha256()
     val zookeeperConfig = ZookeeperConfig(
         100,
         3,
-        "127.0.0.1:2181",
+        connectString,
         "/mutex/service/important",
         "/data/shared",
         30,

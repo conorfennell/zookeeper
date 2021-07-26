@@ -30,6 +30,7 @@ object V {
     const val jackson = "2.12.4"
     const val coroutines = "1.5.1"
     const val kotlinLoggingJvm = "2.0.10"
+    const val testContainers = "1.15.3"
 }
 
 dependencies {
@@ -50,4 +51,21 @@ dependencies {
 
     implementation("com.fasterxml.jackson.core:jackson-databind:${V.jackson}")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${V.jackson}")
+
+    testImplementation("org.testcontainers:testcontainers:${V.testContainers}")
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.7.2")
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.7.2")
+}
+
+tasks {
+    test {
+        useJUnitPlatform()
+        testLogging {
+            events("passed", "skipped", "failed")
+            showExceptions = true
+            exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+            showCauses = true
+            showStackTraces = true
+        }
+    }
 }
